@@ -1,0 +1,4 @@
+pip install requests pillow tqdm python-dotenv aiohttp aiofiles
+echo "EBAY_CLIENT_ID=AndyLiu-getakey-PRD-56c1eb9bb-7bf83e55" >> .env
+echo "EBAY_CLIENT_SECRET=v^1.1#i^1#I^3#f^0#p^3#r^1#t^Ul4xMF80OjEzOUI1MDFCOEUyMUJEQTMxMzY3RDNCNkUxNkUzM0VEXzJfMSNFXjI2MA==" >> .env
+python Grader/machine_learning/datacollector.py --grades 1 2 3 4 5 6 7 8 9 10 --max-per-grade 400

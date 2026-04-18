@@ -1,0 +1,15 @@
+# requirements.txt
+django>=4.2
+djangorestframework
+tensorflow>=2.13
+keras
+Pillow
+numpy
+opencv-python
+requests
+beautifulsoup4
+psycopg2-binary       # PostgreSQL (recommended for image metadata)
+django-storages        # For S3 storage of card images
+boto3
+scikit-learn
+matplotlib
