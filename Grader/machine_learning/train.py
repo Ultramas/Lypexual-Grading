@@ -1,353 +1,447 @@
 """
-130point.com PSA Data Scraper
-==============================
-Scrapes pre-aggregated sold eBay PSA listing data from 130point.com.
-Much faster than iterating PSA certs — 130point already did the pairing.
+Pokemon Card PSA Grader — Model Trainer
+========================================
+Trains an EfficientNetB3-based classifier on your collected training data.
 
 Usage:
-    python scraper_130point.py --grades 1 2 3 4 5 6 7 8 9 10 --per-grade 400
-    python scraper_130point.py --grades 9 10 --per-grade 1000 --keyword charizard
+    python train.py training_data/
+    python train.py training_data/ --epochs 30 --batch 32
+    python train.py training_data/ --resume   # continue from last checkpoint
+
+Expected folder structure:
+    training_data/
+        grade_1/   *.jpg
+        grade_2/   *.jpg
+        ...
+        grade_10/  *.jpg
 
 Output:
-    training_data/
-        grade_1/  *.jpg
-        grade_2/  *.jpg
-        ...
-        grade_10/ *.jpg
-        metadata.json
+    checkpoints/psa_grader.keras   ← used automatically by grader.py
+    checkpoints/training_log.json
 """
 
-import re
 import os
-import time
+import sys
 import json
-import hashlib
-import logging
 import argparse
+import logging
 from pathlib import Path
-
-import requests
-from bs4 import BeautifulSoup
-from PIL import Image
-from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-BASE_URL     = "https://130point.com/sales/"
-OUTPUT_DIR   = Path("training_data")
-RATE_LIMIT   = 1.2          # seconds between page requests (be respectful)
-IMAGE_MIN_PX = 200
-MAX_RETRIES  = 3
+# ── Check TensorFlow before anything else ─────────────────────────────────────
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from tensorflow.keras import layers
+    from tensorflow.keras.applications import EfficientNetB3
+    log.info("TensorFlow %s detected", tf.__version__)
+except ImportError:
+    print("\n  ERROR: TensorFlow not installed.")
+    print("  Install it with:  pip install tensorflow\n")
+    sys.exit(1)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Referer": "https://130point.com/",
-}
+import numpy as np
+from sklearn.model_selection import train_test_split
 
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
 
-# ─── FETCH HELPERS ────────────────────────────────────────────────────────────
-
-def fetch_page(session: requests.Session, url: str, params: dict = None) -> BeautifulSoup | None:
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = session.get(url, params=params, headers=HEADERS, timeout=20)
-            if resp.status_code == 429:
-                wait = 30 * (attempt + 1)
-                log.warning("Rate limited — sleeping %d s", wait)
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return BeautifulSoup(resp.text, "html.parser")
-        except requests.RequestException as e:
-            log.warning("Fetch failed (attempt %d): %s", attempt + 1, e)
-            time.sleep(3)
-    return None
+IMG_SIZE        = (224, 224)
+NUM_CLASSES     = 10
+CHECKPOINT_DIR  = Path(__file__).parent / "checkpoints"
+CHECKPOINT_PATH = CHECKPOINT_DIR / "psa_grader.keras"
+LOG_PATH        = CHECKPOINT_DIR / "training_log.json"
 
 
-# ─── 130POINT SCRAPER ─────────────────────────────────────────────────────────
+# ── DATASET LOADER ────────────────────────────────────────────────────────────
 
-class Point130Scraper:
+def load_dataset(data_dir: Path) -> tuple[list, list]:
     """
-    130point.com aggregates eBay SOLD listings for PSA-graded cards.
-    Each result row contains: card name, grade, sale price, image, eBay link.
-
-    Search URL format:
-      https://130point.com/sales/?searchString=psa+10+pokemon&sortOrder=0
-
-    sortOrder values:
-      0 = Most Recent
-      1 = Highest Price
-      2 = Lowest Price
+    Scan grade_1/ through grade_10/ folders and return
+    (image_paths, labels) where label is 0-indexed (grade-1).
     """
+    image_paths = []
+    labels      = []
+    counts      = {}
 
-    def __init__(self):
-        self.session = requests.Session()
-
-    def search(
-        self,
-        grade: int,
-        keyword: str = "pokemon",
-        max_results: int = 400,
-        sort: int = 0,
-    ) -> list[dict]:
-        """
-        Scrape 130point for PSA <grade> cards matching keyword.
-        Paginates automatically until max_results is reached.
-        """
-        query    = f"psa {grade} {keyword}"
-        results  = []
-        page     = 1
-
-        log.info("130point: searching PSA %d '%s' (want %d)", grade, keyword, max_results)
-
-        while len(results) < max_results:
-            params = {
-                "searchString": query,
-                "sortOrder":    sort,
-                "page":         page,
-            }
-
-            soup = fetch_page(self.session, BASE_URL, params=params)
-            if not soup:
-                log.warning("Failed to fetch page %d for PSA %d", page, grade)
-                break
-
-            batch = self._parse_results(soup, grade)
-            if not batch:
-                log.info("No more results at page %d", page)
-                break
-
-            results.extend(batch)
-            log.info("  PSA %d page %d → %d items (total %d)", grade, page, len(batch), len(results))
-
-            # Check if there's a next page
-            if not self._has_next_page(soup):
-                break
-
-            page += 1
-            time.sleep(RATE_LIMIT)
-
-        return results[:max_results]
-
-    def _parse_results(self, soup: BeautifulSoup, grade: int) -> list[dict]:
-        """Parse one page of 130point search results."""
-        items = []
-
-        # 130point result rows — adjust selector if site structure changes
-        rows = soup.select("div.sale-item, tr.sale-row, .result-row, table tr")
-
-        # Fallback: look for any rows containing price and image data
-        if not rows:
-            rows = soup.find_all("tr")
-
-        for row in rows:
-            try:
-                item = self._parse_row(row, grade)
-                if item:
-                    items.append(item)
-            except Exception as e:
-                log.debug("Row parse error: %s", e)
-
-        return items
-
-    def _parse_row(self, row, grade: int) -> dict | None:
-        """Extract data from a single result row."""
-        # Image
-        img_tag = row.find("img")
-        img_url = None
-        if img_tag:
-            img_url = img_tag.get("src") or img_tag.get("data-src") or ""
-            if img_url and not img_url.startswith("http"):
-                img_url = "https://130point.com" + img_url
-            # Upgrade eBay thumbnail to full resolution
-            img_url = re.sub(r's-l\d+\.jpg', 's-l1600.jpg', img_url)
-
-        # Link to original eBay listing
-        links    = row.find_all("a", href=True)
-        ebay_url = ""
-        for link in links:
-            href = link["href"]
-            if "ebay.com" in href or "ebay" in href.lower():
-                ebay_url = href
-                break
-
-        # Title / card name
-        title = ""
-        for tag in ["td", "div", "span", "p"]:
-            el = row.find(tag, class_=re.compile(r"title|name|desc|item", re.I))
-            if el and el.get_text(strip=True):
-                title = el.get_text(strip=True)
-                break
-        if not title:
-            # Grab all text and take the longest chunk
-            texts = [t.strip() for t in row.stripped_strings if len(t.strip()) > 10]
-            title = max(texts, key=len) if texts else ""
-
-        # Price
-        price    = 0.0
-        price_el = row.find(string=re.compile(r'\$[\d,]+\.?\d*'))
-        if price_el:
-            price_str = re.search(r'[\d,]+\.?\d*', price_el)
-            if price_str:
-                price = float(price_str.group().replace(",", ""))
-
-        # Verify this is actually a PSA card (title sanity check)
-        if not img_url or not title:
-            return None
-        if not re.search(r'psa|pokemon|pokémon|tcg|holo|charizard|pikachu', title, re.I):
-            return None
-        # Confirm grade mentioned in title matches requested grade
-        if not re.search(rf'\bpsa\s*{grade}\b', title, re.I):
-            # Still accept if no grade mentioned — 130point search is grade-specific
-            pass
-
-        return {
-            "grade":   grade,
-            "title":   title,
-            "images":  [img_url] if img_url else [],
-            "url":     ebay_url,
-            "price":   price,
-            "source":  "130point",
-        }
-
-    def _has_next_page(self, soup: BeautifulSoup) -> bool:
-        """Check if a 'next page' link exists."""
-        next_link = soup.find("a", string=re.compile(r'next|›|»', re.I))
-        if next_link:
-            return True
-        # Also check for pagination with page numbers
-        pagination = soup.find(class_=re.compile(r'paginat|page-nav', re.I))
-        if pagination:
-            current = pagination.find(class_=re.compile(r'active|current', re.I))
-            if current and current.find_next_sibling("a"):
-                return True
-        return False
-
-
-# ─── IMAGE DOWNLOADER ─────────────────────────────────────────────────────────
-
-def url_to_filename(url: str, grade: int, index: int) -> str:
-    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    return f"grade_{grade}_{index:05d}_{url_hash}.jpg"
-
-
-def validate_image(path: Path) -> bool:
-    try:
-        with Image.open(path) as img:
-            return img.size[0] >= IMAGE_MIN_PX and img.size[1] >= IMAGE_MIN_PX
-    except Exception:
-        return False
-
-
-def download_image(session: requests.Session, url: str, dest: Path) -> bool:
-    if dest.exists() and validate_image(dest):
-        return True
-    try:
-        resp = session.get(url, timeout=20, stream=True, headers=HEADERS)
-        resp.raise_for_status()
-        if "image" not in resp.headers.get("Content-Type", ""):
-            return False
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest, "wb") as f:
-            for chunk in resp.iter_content(8192):
-                f.write(chunk)
-        if not validate_image(dest):
-            dest.unlink(missing_ok=True)
-            return False
-        return True
-    except Exception:
-        dest.unlink(missing_ok=True)
-        return False
-
-
-def bulk_download(records: list[dict], output_dir: Path):
-    session   = requests.Session()
-    success   = 0
-    failed    = 0
-    per_grade = {}
-
-    queue = []
-    for record in records:
-        grade = record["grade"]
-        per_grade.setdefault(grade, 0)
-        for img_url in record.get("images", []):
-            if not img_url:
-                continue
-            idx      = per_grade[grade]
-            filename = url_to_filename(img_url, grade, idx)
-            dest     = output_dir / f"grade_{grade}" / filename
-            queue.append((img_url, dest))
-            per_grade[grade] += 1
-
-    log.info("Downloading %d images…", len(queue))
-    with tqdm(queue, desc="Downloading") as pbar:
-        for url, dest in pbar:
-            if download_image(session, url, dest):
-                success += 1
-            else:
-                failed += 1
-            pbar.set_postfix(ok=success, fail=failed)
-            time.sleep(0.15)
-
-    # Summary
-    print("\n" + "=" * 50)
-    print("DATASET SUMMARY")
-    print("=" * 50)
-    total = 0
     for grade in range(1, 11):
-        folder = output_dir / f"grade_{grade}"
-        count  = len(list(folder.glob("*.jpg"))) if folder.exists() else 0
-        bar    = "█" * (count // 10)
-        status = "✓" if count >= 100 else "⚠ Low" if count > 0 else "✗ Empty"
-        print(f"  PSA {grade:2d}: {count:4d} images  {bar}  [{status}]")
-        total += count
-    print(f"  TOTAL : {total}")
-    print("=" * 50)
+        folder = data_dir / f"grade_{grade}"
+        if not folder.exists():
+            log.warning("Missing folder: %s", folder)
+            continue
+
+        imgs = (
+            list(folder.glob("*.jpg"))  +
+            list(folder.glob("*.jpeg")) +
+            list(folder.glob("*.png"))  +
+            list(folder.glob("*.webp"))
+        )
+
+        if not imgs:
+            log.warning("No images in %s", folder)
+            continue
+
+        image_paths.extend([str(p) for p in imgs])
+        labels.extend([grade - 1] * len(imgs))   # 0-indexed for keras
+        counts[grade] = len(imgs)
+
+    # Print dataset summary
+    print("\n" + "═" * 46)
+    print("  DATASET LOADED")
+    print("═" * 46)
+    total = 0
+    for g in range(1, 11):
+        n   = counts.get(g, 0)
+        bar = "█" * (n // 10)
+        ok  = "✓" if n >= 100 else "⚠" if n > 0 else "✗ MISSING"
+        print(f"  PSA {g:2d}: {n:4d} imgs  {bar:<20} {ok}")
+        total += n
+    print("─" * 46)
+    print(f"  TOTAL : {total} images\n")
+
+    if total < 100:
+        print("  ERROR: Not enough images to train (need at least 100 total).")
+        print("  Run the scraper first: python scraper_playwright.py --grades 1 2 3 4 5 6 7 8 9 10\n")
+        sys.exit(1)
+
+    low_grades = [g for g, n in counts.items() if n < 50]
+    if low_grades:
+        log.warning(
+            "Low sample count for grades %s — model accuracy will be limited for these grades. "
+            "Run the scraper with more --per-grade to improve.",
+            low_grades,
+        )
+
+    return image_paths, labels
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ── TF DATASET ────────────────────────────────────────────────────────────────
+
+def make_tf_dataset(
+    paths:      list[str],
+    labels:     list[int],
+    batch_size: int,
+    augment:    bool = False,
+) -> tf.data.Dataset:
+    """Build a tf.data pipeline with optional augmentation."""
+
+    def load_and_preprocess(path, label):
+        raw  = tf.io.read_file(path)
+        img  = tf.image.decode_image(raw, channels=3, expand_animations=False)
+        img  = tf.image.resize(img, IMG_SIZE)
+        img  = tf.cast(img, tf.float32) / 255.0
+        return img, label
+
+    def augment_fn(img, label):
+        img = tf.image.random_flip_left_right(img)
+        img = tf.image.random_brightness(img, 0.15)
+        img = tf.image.random_contrast(img, 0.85, 1.15)
+        img = tf.image.random_saturation(img, 0.85, 1.15)
+        img = tf.image.random_jpeg_quality(img, 70, 100)
+        # Random rotation ±8°
+        angle = tf.random.uniform([], -0.14, 0.14)
+        img   = tf.keras.preprocessing.image.apply_affine_transform(
+            img.numpy(), theta=angle * 57.3
+        ) if False else img   # skip for now — tfa dependency
+        img = tf.clip_by_value(img, 0.0, 1.0)
+        return img, label
+
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    ds = ds.map(load_and_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+    if augment:
+        ds = ds.map(augment_fn, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.shuffle(buffer_size=min(len(paths), 2000))
+    ds = ds.batch(batch_size)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
+
+
+# ── CLASS WEIGHTS (handle imbalanced grades) ──────────────────────────────────
+
+def compute_class_weights(labels: list[int]) -> dict:
+    """
+    Give higher weight to rare grades (PSA 1, 2) so the model doesn't
+    just predict 'PSA 9' for everything.
+    """
+    from collections import Counter
+    counts  = Counter(labels)
+    total   = len(labels)
+    n_cls   = NUM_CLASSES
+    weights = {}
+    for cls in range(n_cls):
+        n = counts.get(cls, 1)
+        weights[cls] = (total / (n_cls * n))
+    return weights
+
+
+# ── MODEL BUILDER ─────────────────────────────────────────────────────────────
+
+def build_model(freeze_base: bool = True) -> keras.Model:
+    base = EfficientNetB3(
+        include_top=False,
+        weights="imagenet",
+        input_shape=(*IMG_SIZE, 3),
+    )
+    base.trainable = not freeze_base
+
+    inputs = keras.Input(shape=(*IMG_SIZE, 3))
+
+    # Light augmentation baked into the model
+    x = layers.RandomFlip("horizontal")(inputs)
+    x = layers.RandomRotation(0.04)(x)
+    x = layers.RandomZoom(0.08)(x)
+    x = layers.RandomBrightness(0.10)(x)
+
+    x = base(x, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dense(512, activation="relu")(x)
+    x = layers.Dropout(0.40)(x)
+    x = layers.Dense(256, activation="relu")(x)
+    x = layers.Dropout(0.30)(x)
+
+    outputs = layers.Dense(NUM_CLASSES, activation="softmax", name="grade_output")(x)
+
+    model = keras.Model(inputs, outputs, name="PSAGrader")
+    return model
+
+
+def compile_model(model: keras.Model, lr: float, frozen: bool):
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        loss="sparse_categorical_crossentropy",
+        metrics=[
+            "accuracy",
+            keras.metrics.SparseTopKCategoricalAccuracy(k=2, name="top2_acc"),
+        ],
+    )
+    status = "frozen base" if frozen else "fine-tuning"
+    log.info("Model compiled — %s, lr=%.2e, params=%d",
+             status, lr, model.count_params())
+
+
+def unfreeze_top(model: keras.Model, n_layers: int = 40):
+    base = model.get_layer("efficientnetb3")
+    base.trainable = True
+    for layer in base.layers[:-n_layers]:
+        layer.trainable = False
+    log.info("Unfroze top %d layers of EfficientNetB3", n_layers)
+
+
+# ── CALLBACKS ─────────────────────────────────────────────────────────────────
+
+def make_callbacks(stage: int) -> list:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    return [
+        keras.callbacks.ModelCheckpoint(
+            str(CHECKPOINT_PATH),
+            monitor="val_accuracy",
+            save_best_only=True,
+            verbose=1,
+        ),
+        keras.callbacks.EarlyStopping(
+            monitor="val_accuracy",
+            patience=8,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=3,
+            min_lr=1e-7,
+            verbose=1,
+        ),
+        keras.callbacks.CSVLogger(
+            str(CHECKPOINT_DIR / f"stage{stage}_log.csv"),
+            append=True,
+        ),
+    ]
+
+
+# ── TRAINING PIPELINE ─────────────────────────────────────────────────────────
+
+def train(
+    data_dir:      Path,
+    batch_size:    int   = 32,
+    epochs_stage1: int   = 20,
+    epochs_stage2: int   = 30,
+    resume:        bool  = False,
+):
+    # ── Load data ──────────────────────────────────────────────────────
+    image_paths, labels = load_dataset(data_dir)
+
+    X_train, X_tmp, y_train, y_tmp = train_test_split(
+        image_paths, labels,
+        test_size=0.30,
+        stratify=labels,
+        random_state=42,
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_tmp, y_tmp,
+        test_size=0.50,
+        stratify=y_tmp,
+        random_state=42,
+    )
+
+    log.info("Split: train=%d  val=%d  test=%d", len(X_train), len(X_val), len(X_test))
+
+    train_ds = make_tf_dataset(X_train, y_train, batch_size, augment=True)
+    val_ds   = make_tf_dataset(X_val,   y_val,   batch_size, augment=False)
+    test_ds  = make_tf_dataset(X_test,  y_test,  batch_size, augment=False)
+
+    class_weights = compute_class_weights(y_train)
+    log.info("Class weights: %s", {f"PSA{k+1}": round(v, 2) for k, v in class_weights.items()})
+
+    # ── Build or resume model ──────────────────────────────────────────
+    if resume and CHECKPOINT_PATH.exists():
+        log.info("Resuming from checkpoint: %s", CHECKPOINT_PATH)
+        model = keras.models.load_model(str(CHECKPOINT_PATH))
+        compile_model(model, lr=1e-4, frozen=False)
+    else:
+        model = build_model(freeze_base=True)
+        compile_model(model, lr=1e-3, frozen=True)
+
+    model.summary(line_length=80)
+
+    # ── STAGE 1: Train head only ───────────────────────────────────────
+    if not resume:
+        print("\n" + "═"*46)
+        print("  STAGE 1: Training classification head")
+        print("  (EfficientNet base frozen, ImageNet weights)")
+        print("═"*46)
+
+        history1 = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs_stage1,
+            class_weight=class_weights,
+            callbacks=make_callbacks(stage=1),
+        )
+
+        best_val = max(history1.history.get("val_accuracy", [0]))
+        log.info("Stage 1 best val_accuracy: %.4f", best_val)
+
+    # ── STAGE 2: Fine-tune top EfficientNet layers ─────────────────────
+    print("\n" + "═"*46)
+    print("  STAGE 2: Fine-tuning EfficientNetB3 top layers")
+    print("  (Lower learning rate, more layers unfrozen)")
+    print("═"*46)
+
+    unfreeze_top(model, n_layers=40)
+    compile_model(model, lr=1e-5, frozen=False)
+
+    initial_epoch = epochs_stage1 if not resume else 0
+
+    history2 = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=initial_epoch + epochs_stage2,
+        initial_epoch=initial_epoch,
+        class_weight=class_weights,
+        callbacks=make_callbacks(stage=2),
+    )
+
+    # ── Final evaluation ───────────────────────────────────────────────
+    print("\n" + "═"*46)
+    print("  FINAL TEST SET EVALUATION")
+    print("═"*46)
+    results = model.evaluate(test_ds, verbose=1)
+    metric_names = model.metrics_names
+    metrics_dict = dict(zip(metric_names, results))
+
+    print(f"\n  Test Loss     : {metrics_dict.get('loss', 0):.4f}")
+    print(f"  Test Accuracy : {metrics_dict.get('accuracy', 0)*100:.2f}%")
+    print(f"  Top-2 Accuracy: {metrics_dict.get('top2_acc', 0)*100:.2f}%")
+
+    # ── Per-class accuracy ─────────────────────────────────────────────
+    print("\n  Per-grade accuracy:")
+    all_preds = []
+    all_true  = []
+    for batch_imgs, batch_labels in test_ds:
+        preds = model.predict(batch_imgs, verbose=0)
+        all_preds.extend(np.argmax(preds, axis=1))
+        all_true.extend(batch_labels.numpy())
+
+    for grade_idx in range(NUM_CLASSES):
+        mask   = [i for i, y in enumerate(all_true) if y == grade_idx]
+        if not mask:
+            continue
+        n_correct = sum(1 for i in mask if all_preds[i] == grade_idx)
+        acc       = n_correct / len(mask) * 100
+        bar       = "█" * int(acc / 5)
+        print(f"    PSA {grade_idx+1:2d}: {acc:5.1f}%  {bar}")
+
+    # ── Save final model ───────────────────────────────────────────────
+    model.save(str(CHECKPOINT_PATH))
+    print(f"\n  ✓ Model saved → {CHECKPOINT_PATH}")
+    print("  ✓ Run grader.py to use it:\n")
+    print("      python grader.py your_card.jpg\n")
+
+    # Save training log
+    log_data = {
+        "test_metrics":  metrics_dict,
+        "train_samples": len(X_train),
+        "val_samples":   len(X_val),
+        "test_samples":  len(X_test),
+        "batch_size":    batch_size,
+        "epochs_s1":     epochs_stage1,
+        "epochs_s2":     epochs_stage2,
+        "checkpoint":    str(CHECKPOINT_PATH),
+    }
+    with open(LOG_PATH, "w") as f:
+        json.dump(log_data, f, indent=2, default=str)
+
+    return model
+
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="130point.com PSA data collector")
-    parser.add_argument("--grades",    nargs="+", type=int, default=list(range(1, 11)))
-    parser.add_argument("--keyword",   default="pokemon", help="Search keyword")
-    parser.add_argument("--per-grade", type=int, default=400, help="Max results per grade")
-    parser.add_argument("--output",    default="training_data")
-    parser.add_argument("--no-download", action="store_true", help="Collect metadata only, skip image download")
+    parser = argparse.ArgumentParser(
+        description="Train PSA card grading model",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python train.py training_data/
+  python train.py training_data/ --epochs1 15 --epochs2 25 --batch 16
+  python train.py training_data/ --resume
+        """,
+    )
+    parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to training_data/ folder containing grade_1/ … grade_10/ subfolders",
+    )
+    parser.add_argument("--epochs1",  type=int, default=20,  help="Stage 1 epochs (default 20)")
+    parser.add_argument("--epochs2",  type=int, default=30,  help="Stage 2 epochs (default 30)")
+    parser.add_argument("--batch",    type=int, default=32,  help="Batch size (default 32; use 16 if OOM)")
+    parser.add_argument("--resume",   action="store_true",   help="Resume from existing checkpoint")
     args = parser.parse_args()
 
-    output_dir = Path(args.output)
-    scraper    = Point130Scraper()
-    all_records = []
+    if not args.data_dir.exists():
+        print(f"\n  ERROR: Directory not found: {args.data_dir}")
+        print("  Make sure the scraper has finished and training_data/ exists.\n")
+        sys.exit(1)
 
-    for grade in args.grades:
-        records = scraper.search(
-            grade=grade,
-            keyword=args.keyword,
-            max_results=args.per_grade,
-        )
-        all_records.extend(records)
-        log.info("Grade %d: %d records collected", grade, len(records))
-        time.sleep(RATE_LIMIT)
+    # GPU info
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        log.info("GPU detected: %s", [g.name for g in gpus])
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    else:
+        log.warning("No GPU detected — training on CPU will be slow.")
+        log.warning("Consider using Google Colab (free GPU) if training takes too long.")
 
-    print(f"\nTotal records: {len(all_records)}")
-
-    # Save metadata
-    output_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = output_dir / "metadata_130point.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(all_records, f, indent=2)
-    print(f"Metadata saved → {meta_path}")
-
-    if not args.no_download:
-        bulk_download(all_records, output_dir)
+    train(
+        data_dir      = args.data_dir,
+        batch_size    = args.batch,
+        epochs_stage1 = args.epochs1,
+        epochs_stage2 = args.epochs2,
+        resume        = args.resume,
+    )
 
 
 if __name__ == "__main__":
