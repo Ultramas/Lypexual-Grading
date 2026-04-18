@@ -796,27 +796,95 @@ def test_dataset(data_dir: str, sample: int = 50):
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Pokemon Card PSA Grader")
-    parser.add_argument("images",        nargs="*", help="Image file(s) to grade")
+    parser = argparse.ArgumentParser(
+        description="Pokemon Card PSA Grader + Price Comparator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GRADING MODE:
+  python grader.py card.jpg
+  python grader.py card1.jpg card2.jpg --json
+  python grader.py --test-dataset training_data/
+
+COMPARISON MODE:
+  python grader.py --compare "PSA 10 Charizard Base Set"
+  python grader.py --compare "https://www.ebay.com/itm/123456"
+  python grader.py --compare "Pikachu 1st Edition" --min-price 10 --max-price 500
+  python grader.py --compare "PSA 9 Blastoise" --platforms ebay tcgplayer mercari
+
+COMBINED (grade a card AND find cheapest price):
+  python grader.py card.jpg --compare "PSA 10 Charizard"
+        """,
+    )
+
+    # ── Grading args ──────────────────────────────────────────────────────
+    parser.add_argument("images",         nargs="*",
+                        help="Image file(s) to grade")
     parser.add_argument("--test-dataset", metavar="DIR",
                         help="Run accuracy test against training_data/ folder")
-    parser.add_argument("--json",        action="store_true",
-                        help="Output raw JSON instead of formatted report")
-    parser.add_argument("--sample",      type=int, default=30,
-                        help="Images to sample per grade during testing (default 30)")
+    parser.add_argument("--json",         action="store_true",
+                        help="Output raw JSON")
+    parser.add_argument("--sample",       type=int, default=30,
+                        help="Images to sample per grade during testing")
+
+    # ── Comparison args ───────────────────────────────────────────────────
+    parser.add_argument("--compare",      metavar="QUERY_OR_URL",
+                        help="Compare prices across platforms for this card name or URL")
+    parser.add_argument("--platforms",    nargs="+",
+                        choices=["ebay","amazon","tcgplayer","mercari",
+                                 "facebook","craigslist","whatnot"],
+                        default=["ebay","amazon","tcgplayer","mercari",
+                                 "facebook","craigslist","whatnot"],
+                        help="Platforms to search (default: all)")
+    parser.add_argument("--min-price",    type=float, default=0.0)
+    parser.add_argument("--max-price",    type=float, default=999999.0)
+    parser.add_argument("--max-results",  type=int,   default=8,
+                        help="Max results per platform")
+
     args = parser.parse_args()
 
+    # ── Dataset test mode ─────────────────────────────────────────────────
     if args.test_dataset:
         test_dataset(args.test_dataset, sample=args.sample)
         return
 
+    # ── Comparison mode ───────────────────────────────────────────────────
+    if args.compare:
+        from compare import normalize_query, compare_listings, print_comparison
+        resolved = normalize_query(args.compare)
+        query    = resolved["query"]
+        if resolved["source_url"]:
+            print(f"\n  Source URL → extracted query: '{query}'")
+        results = compare_listings(
+            query       = query,
+            platforms   = args.platforms,
+            min_price   = args.min_price,
+            max_price   = args.max_price,
+            max_results = args.max_results,
+        )
+        if args.json:
+            import json as _json
+            output = {
+                "query":    results["query"],
+                "cheapest": results["cheapest"].to_dict() if results["cheapest"] else None,
+                "total_found": results["total_found"],
+                "all_listings": [l.to_dict() for l in results["all_listings"]],
+            }
+            print(_json.dumps(output, indent=2, default=str))
+        else:
+            print_comparison(results)
+
+        # If images were also provided, fall through to grade them too
+        if not args.images:
+            return
+
+    # ── Grading mode ──────────────────────────────────────────────────────
     if not args.images:
         parser.print_help()
-        print("\nExample usage:")
+        print("\nExamples:")
         print("  python grader.py my_card.jpg")
-        print("  python grader.py *.jpg --json")
-        print("  python grader.py --test-dataset training_data/")
+        print("  python grader.py --compare 'PSA 10 Charizard Base Set'")
         return
 
     results = []
@@ -824,7 +892,8 @@ def main():
         result = grade_card(img_path)
         results.append(result)
         if args.json:
-            print(json.dumps(result, indent=2, default=str))
+            import json as _json
+            print(_json.dumps(result, indent=2, default=str))
         else:
             print_result(result)
 
@@ -832,8 +901,8 @@ def main():
         print(f"\n  Graded {len(results)} cards:")
         for r in results:
             if "error" not in r:
-                g = r["overall_grade"]
-                print(f"    {r['file']:<40} PSA {g}  {r['grade_name']}")
+                print(f"    {r['file']:<40} PSA {r['overall_grade']}  {r['grade_name']}")
+
 
 
 if __name__ == "__main__":
