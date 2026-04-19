@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Marketplace Comparison Assistant",
+  "version": "0.1.0",
+  "description": "Skeleton for comparing eBay, Facebook Marketplace, and Craigslist listings with manual capture controls.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "marketplace-comparer@example.local",
+      "strict_min_version": "121.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.ebay.com/*",
+    "https://*.facebook.com/*",
+    "https://*.craigslist.org/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_title": "Marketplace Comparison Assistant",
+    "default_popup": "src/popup.html"
+  },
+  "options_page": "src/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.ebay.com/*",
+        "https://*.facebook.com/*",
+        "https://*.craigslist.org/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

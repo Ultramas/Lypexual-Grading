@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Extension Options</title>
+    <style>
+      body {
+        font-family: Inter, Arial, sans-serif;
+        margin: 0;
+        background: #0f172a;
+        color: #e5eefc;
+      }
+
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 32px 20px;
+        display: grid;
+        gap: 16px;
+      }
+
+      .card {
+        background: #111827;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-radius: 14px;
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+      }
+
+      input,
+      button {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        box-sizing: border-box;
+      }
+
+      input {
+        background: #0b1220;
+        color: #f8fbff;
+      }
+
+      button {
+        background: #2563eb;
+        color: white;
+        border: 0;
+        cursor: pointer;
+        width: fit-content;
+      }
+
+      .muted {
+        color: #9fb1d1;
+      }
+
+      pre {
+        background: #0b1220;
+        border-radius: 10px;
+        padding: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Marketplace Comparison Assistant Options</h1>
+        <div class="muted">Firefox-first defaults for ratings, taxes, and coupon behavior.</div>
+      </div>
+
+      <div class="card">
+        <label>
+          Default minimum positive ratings
+          <input id="minPositiveRatings" type="number" min="0" value="5" />
+        </label>
+
+        <label>
+          Negative ratio divisor
+          <input id="maxNegativeRatioDivisor" type="number" min="1" value="5" />
+        </label>
+
+        <label>
+          Default tax rate
+          <input id="defaultTaxRate" type="number" min="0" step="0.001" value="0" />
+        </label>
+
+        <label>
+          Preferred state for tax rules
+          <input id="defaultState" type="text" value="" />
+        </label>
+
+        <button id="save">Save</button>
+      </div>
+
+      <pre id="status"></pre>
+    </div>
+    <script src="options.js"></script>
+  </body>
+  </html>

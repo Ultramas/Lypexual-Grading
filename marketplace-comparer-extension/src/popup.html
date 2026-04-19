@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Marketplace Comparison Assistant</title>
+    <style>
+      body {
+        font-family: Inter, Arial, sans-serif;
+        width: 360px;
+        margin: 0;
+        padding: 0;
+        background: #0f172a;
+        color: #e5eefc;
+      }
+
+      .panel {
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 8px;
+      }
+
+      .hero {
+        padding: 18px 16px 12px;
+        background: linear-gradient(135deg, #111827 0%, #1d4ed8 100%);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      h1 {
+        font-size: 16px;
+        margin: 0;
+      }
+
+      .subtle {
+        margin: 4px 0 0;
+        font-size: 12px;
+        color: #c7d7f8;
+      }
+
+      textarea,
+      input,
+      select,
+      button {
+        width: 100%;
+        box-sizing: border-box;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      textarea,
+      input,
+      select {
+        background: #111827;
+        color: #f8fbff;
+        padding: 10px 12px;
+      }
+
+      textarea {
+        min-height: 70px;
+      }
+
+      button {
+        background: #2563eb;
+        color: white;
+        padding: 10px 12px;
+        cursor: pointer;
+        border: 0;
+        font-weight: 600;
+      }
+
+      button.secondary {
+        background: #172033;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+      }
+
+      .card {
+        background: #111827;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-radius: 14px;
+        padding: 12px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .muted {
+        color: #9fb1d1;
+        font-size: 12px;
+      }
+
+      .sectionTitle {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #9fb1d1;
+        margin-bottom: 8px;
+      }
+
+      .pillRow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .pill {
+        border-radius: 999px;
+        padding: 5px 9px;
+        font-size: 11px;
+        background: rgba(37, 99, 235, 0.15);
+        color: #dbeafe;
+        border: 1px solid rgba(96, 165, 250, 0.22);
+      }
+
+      .miniList {
+        display: grid;
+        gap: 8px;
+      }
+
+      .miniItem {
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: #0b1220;
+        border: 1px solid rgba(148, 163, 184, 0.12);
+      }
+
+      .miniItem strong {
+        display: block;
+        font-size: 12px;
+      }
+
+      .miniMeta {
+        font-size: 11px;
+        color: #8fa7cf;
+        margin-top: 3px;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+
+      .toggle input {
+        width: auto;
+      }
+
+      #consentCard {
+        display: none;
+      }
+
+      #results {
+        white-space: pre-wrap;
+        font-size: 12px;
+        background: #0b1220;
+        padding: 8px;
+        border-radius: 10px;
+        max-height: 180px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="hero">
+      <h1>Marketplace Comparison Assistant</h1>
+      <p class="subtle">Firefox-first manual comparison workflow for eBay, Facebook Marketplace, and Craigslist.</p>
+    </div>
+
+    <div class="panel">
+      <div id="consentCard" class="card stack">
+        <strong>Privacy Setup</strong>
+        <div class="muted">Allow cookies/history logging so the extension can save search and view history across sessions. Coupon lookup stays optional.</div>
+        <button id="allowCookies">Allow Cookies & History</button>
+        <button id="declineCookies" class="secondary">Continue Without Logging</button>
+      </div>
+
+      <div class="card stack">
+        <input id="brand" placeholder="Brand (optional)" />
+        <input id="title" placeholder="Title (required)" />
+        <textarea id="description" placeholder="Description (required)"></textarea>
+      </div>
+
+      <div class="card stack">
+        <div class="row">
+          <select id="distanceScope">
+            <option value="any">Any distance</option>
+            <option value="city">Same city</option>
+            <option value="state">Same state</option>
+            <option value="country">Same country</option>
+          </select>
+          <input id="userState" placeholder="State for tax" />
+        </div>
+
+        <div class="toggle"><input id="freeShippingOnly" type="checkbox" /> <span>Free shipping only</span></div>
+        <div class="toggle"><input id="brandRequired" type="checkbox" /> <span>Require brand match</span></div>
+        <div class="toggle"><input id="sellerStandingBoost" type="checkbox" checked /> <span>Boost seller standing</span></div>
+        <div class="toggle"><input id="couponOptIn" type="checkbox" /> <span>Opt into coupon lookup</span></div>
+      </div>
+
+      <div class="stack">
+        <button id="captureListing">Capture Current Listing</button>
+        <button id="searchOtherPlatforms">Search Other Platforms</button>
+        <button id="collectResults" class="secondary">Collect Current Page Results</button>
+        <button id="applyFilters" class="secondary">Save Filters & Draft</button>
+      </div>
+
+      <div class="card stack">
+        <div class="sectionTitle">Workflow Status</div>
+        <div class="pillRow" id="statusPills">
+          <span class="pill">Draft Ready</span>
+          <span class="pill">Manual Capture Flow</span>
+          <span class="pill">Firefox First</span>
+        </div>
+      </div>
+
+      <div class="card stack">
+        <div class="sectionTitle">Results Shell</div>
+        <div id="resultsSummary" class="miniList">
+          <div class="miniItem">
+            <strong>No ranked results yet</strong>
+            <div class="miniMeta">This section will later show best landed-cost matches across platforms.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card stack">
+        <div class="sectionTitle">Recent Activity</div>
+        <div id="historySummary" class="miniList">
+          <div class="miniItem">
+            <strong>No history yet</strong>
+            <div class="miniMeta">Searches and viewed listings only appear here after consent.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="muted">Manual-control skeleton only. Live selectors, ranking, coupons, and platform parsing still need implementation.</div>
+      <div id="results">No actions run yet.</div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+  </html>
